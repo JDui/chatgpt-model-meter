@@ -1,42 +1,58 @@
-/* 用合成数据跑 model.js，不联网。重点：执行模型只认 server_ste_metadata。 */
+/* Synthetic regression tests for model.js. No network access required. */
 const fs = require('fs');
 const vm = require('vm');
+const path = require('path');
 
-const SRC = require('path').join(__dirname, '..', 'model.js');
-
+const SRC = path.join(__dirname, '..', 'model.js');
 const posted = [];
 const listeners = {};
 
 globalThis.window = globalThis;
-window.addEventListener = (t, fn) => { (listeners[t] = listeners[t] || []).push(fn); };
+window.addEventListener = (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); };
 window.postMessage = (data) => {
   posted.push(data);
   (listeners.message || []).forEach((fn) => fn({ source: window, data }));
 };
-globalThis.document = { getElementById: () => null, querySelectorAll: () => [], documentElement: {} };
+globalThis.document = { getElementById: () => null, querySelectorAll: () => [] };
 globalThis.location = { href: 'https://chatgpt.com/', origin: 'https://chatgpt.com' };
 
 let nextBody = '';
 let nextType = 'text/event-stream';
-window.fetch = async () => new Response(nextBody, { headers: { 'content-type': nextType } });
+let nextHeaders = {};
+window.fetch = async () => new Response(nextBody, { headers: { 'content-type': nextType, ...nextHeaders } });
 
 class FakeSocket {
   constructor(url) { this.url = url; this.handlers = []; }
   addEventListener(type, fn) { if (type === 'message') this.handlers.push(fn); }
-  emit(text) { this.handlers.forEach((fn) => fn({ data: text })); }
+  emit(data) { this.handlers.forEach((fn) => fn({ data })); }
 }
 window.WebSocket = FakeSocket;
-globalThis.XMLHttpRequest = class { open() {} send() {} addEventListener() {} };
+
+globalThis.XMLHttpRequest = class {
+  constructor() {
+    this.handlers = {};
+    this.responseText = '';
+    this.responseType = '';
+    this.response = null;
+    this._responseHeaders = {};
+  }
+  open() {}
+  send() {}
+  addEventListener(type, fn) { (this.handlers[type] = this.handlers[type] || []).push(fn); }
+  getResponseHeader(name) { return this._responseHeaders[String(name).toLowerCase()] || ''; }
+  getAllResponseHeaders() { return Object.entries(this._responseHeaders).map(([k, v]) => `${k}: ${v}`).join('\r\n'); }
+  complete() { (this.handlers.loadend || []).forEach((fn) => fn()); }
+};
 window.XMLHttpRequest = globalThis.XMLHttpRequest;
 
 vm.runInThisContext(fs.readFileSync(SRC, 'utf8'), { filename: SRC });
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms = 220) => new Promise((r) => setTimeout(r, ms));
 const latest = () => {
-  for (let i = posted.length - 1; i >= 0; i--) if (posted[i].snapshot) return posted[i].snapshot;
+  for (let i = posted.length - 1; i >= 0; i--) if (posted[i]?.snapshot) return posted[i].snapshot;
   return null;
 };
-const cur = () => latest().turns[0];
+const cur = () => latest()?.turns?.[0];
 const sse = (obj) => 'data: ' + JSON.stringify(obj) + '\n\n';
 const named = (name, obj) => 'event: ' + name + '\ndata: ' + JSON.stringify(obj) + '\n\n';
 const DONE = 'data: [DONE]\n\n';
@@ -46,283 +62,323 @@ function check(label, actual, expected) {
   const a = JSON.stringify(actual), e = JSON.stringify(expected);
   const ok = a === e;
   if (!ok) failed++;
-  console.log((ok ? '  PASS  ' : '  FAIL  ') + label + (ok ? '' : '\n         期望 ' + e + '\n         实际 ' + a));
+  console.log((ok ? '  PASS  ' : '  FAIL  ') + label + (ok ? '' : `\n         expected ${e}\n         actual   ${a}`));
+}
+function ok(label, value) { check(label, !!value, true); }
+
+async function send(body, api = 'f/conversation', headers) {
+  return window.fetch('/backend-api/' + api, {
+    method: 'POST',
+    body: JSON.stringify(body),
+    headers
+  });
+}
+function req(model, conv, extra = {}) {
+  return {
+    model,
+    conversation_id: conv,
+    messages: [{ id: 'user-' + conv, author: { role: 'user' } }],
+    ...extra
+  };
+}
+function ev(pathNeedle) {
+  return cur().evidence.find((x) => x.path.includes(pathNeedle));
 }
 
-const send = (api, body) => window.fetch('/backend-api/' + api, { method: 'POST', body: JSON.stringify(body) });
-const askThinking = (conv) => send('conversation', {
-  model: 'gpt-5-6-thinking',
-  conversation_id: conv,
-  messages: [{ id: 'user-' + conv, author: { role: 'user' } }]
-});
-
-// 流中间的 message 事件：带的是请求回显
-const echoFrame = (conv, slug) => sse({
-  conversation_id: conv,
-  message: {
-    id: 'asst-' + conv,
-    author: { role: 'assistant' },
-    content: { content_type: 'text', parts: ['正文'] },
-    metadata: { parent_id: 'user-' + conv, model_slug: slug }
-  }
-});
-
 (async () => {
-  /* ---------- 1. 重路由：请求 thinking，STE 报 mini ---------- */
-  console.log('\n[1] 重路由，STE 顶层平铺');
-  nextBody =
-    'event: delta_encoding\ndata: "v1"\n\n' +
-    echoFrame('c1', 'gpt-5-6-thinking') +
-    sse({
-      type: 'server_ste_metadata',
-      model_slug: 'gpt-5-5-mini',
-      requested_model_experience: 'thinking',
-      plan_type: 'plus',
-      tool_invoked: false,
-      turn_use_case: 'text',
-      did_auto_switch_to_reasoning: false,
-      is_autoswitcher_enabled: true,
-      server_ttfvt_ms: 842
-    }) + DONE;
-  await askThinking('c1');
-  await sleep(300);
-
-  let t = cur();
-  check('请求', t.requested, 'gpt-5-6-thinking');
-  check('执行（STE）', t.exec, ['gpt-5-5-mini']);
-  check('回显（message）不混进执行', t.echo, ['gpt-5-6-thinking']);
-  check('状态', t.state, '已确认执行模型');
-  check('STE 附加字段', t.flags, {
-    requested_model_experience: 'thinking',
-    did_auto_switch_to_reasoning: false,
-    is_autoswitcher_enabled: true,
-    tool_invoked: false,
-    turn_use_case: 'text',
-    plan_type: 'plus',
-    server_ttfvt_ms: 842
-  });
-
-  /* ---------- 2. STE 只靠 event: 名标识 ---------- */
-  console.log('\n[2] STE 只有 event: 名');
-  nextBody = echoFrame('c2', 'gpt-5-6-thinking')
-    + named('server_ste_metadata', { model_slug: 'gpt-5-6-instant' }) + DONE;
-  await askThinking('c2');
-  await sleep(300);
-  t = cur();
-  check('靠事件名认出 STE', t.exec, ['gpt-5-6-instant']);
-  check('回显仍归回显', t.echo, ['gpt-5-6-thinking']);
-
-  /* ---------- 3. 老形态：嵌在 message.metadata.server_ste_metadata 里 ---------- */
-  console.log('\n[3] 嵌套形态');
+  console.log('\n[1] STE authoritative mismatch => ROUTED');
+  nextType = 'text/event-stream'; nextHeaders = {};
   nextBody = sse({
-    conversation_id: 'c3',
-    message: {
-      id: 'asst-c3',
-      author: { role: 'assistant' },
-      metadata: {
-        parent_id: 'user-c3',
-        model_slug: 'gpt-5-6-thinking',
-        server_ste_metadata: { model_slug: 'gpt-5-6-thinking' }
-      }
-    }
-  }) + DONE;
-  await askThinking('c3');
-  await sleep(300);
-  t = cur();
-  check('嵌套 STE 进执行桶', t.exec, ['gpt-5-6-thinking']);
-  check('同一帧的回显进回显桶', t.echo, ['gpt-5-6-thinking']);
+    conversation_id: 'c1',
+    message: { id: 'a1', author: { role: 'assistant' }, metadata: { parent_id: 'user-c1', model_slug: 'gpt-5-6-thinking' } }
+  }) + named('server_ste_metadata', { model_slug: 'gpt-5-5-mini', requested_model_experience: 'thinking', server_ttfvt_ms: 40 }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c1'));
+  await sleep();
+  check('decision', cur().decision, 'ROUTED');
+  check('requested', cur().requested, 'gpt-5-6-thinking');
+  check('effective', cur().effective, 'gpt-5-5-mini');
+  check('message echo category', ev('message.metadata.model_slug').category, 'requested');
+  check('STE category', cur().evidence.find((x) => x.event === 'server_ste_metadata' && x.path.endsWith('model_slug')).category, 'effective');
 
-  /* ---------- 4. 整条流都没有 STE ---------- */
-  console.log('\n[4] 没有 STE 事件');
-  nextBody = echoFrame('c4', 'gpt-5-6-thinking') + DONE;
-  await askThinking('c4');
-  await sleep(300);
-  t = cur();
-  check('执行桶为空', t.exec, []);
-  check('回显有值', t.echo, ['gpt-5-6-thinking']);
-  check('流已结束', t.closed, true);
-  check('状态说清楚', t.state, '流已结束，没有 STE 事件');
+  console.log('\n[2] snapshot suffix canonicalization => MATCH');
+  nextBody = named('response.completed', { response: { model: 'gpt-5-6-thinking-2026-09-20' } }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c2'));
+  await sleep();
+  check('decision', cur().decision, 'MATCH');
+  check('effective canonical', cur().effectiveCanonical, 'gpt-5-6-thinking');
 
-  /* ---------- 5. work：handoff + WebSocket 末尾的 STE ---------- */
-  console.log('\n[5] work 后台任务');
-  nextBody = sse({ type: 'stream_handoff', conversation_id: 'c5', turn_exchange_id: 'tex-5' });
-  await send('f/conversation', {
-    model: 'gpt-6-astra-wm',
-    conversation_id: 'c5',
-    thinking_effort: 'high',
-    messages: [{ id: 'user-c5', author: { role: 'user' } }]
-  });
-  await sleep(300);
-  t = cur();
-  check('移交后不算结束', t.closed, false);
-  check('状态', t.state, '已移交后台，等 STE');
+  console.log('\n[3] auxiliary candidate alone never proves route');
+  nextBody = sse({ fasterModel: 'gpt-5-6-instant', retry_model: 'gpt-5-5-mini', fallback_model: 'gpt-5-4-mini' }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c3'));
+  await sleep();
+  check('decision', cur().decision, 'SUSPICIOUS');
+  check('no effective model', cur().effective, '');
+  check('faster category', ev('fasterModel').category, 'auxiliary');
+  check('retry category', ev('retry_model').category, 'auxiliary');
+  check('fallback category', ev('fallback_model').category, 'auxiliary');
 
+  console.log('\n[4] same-model auxiliary evidence => UNKNOWN');
+  nextBody = sse({ fasterModel: 'gpt-5-6-thinking' }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c4'));
+  await sleep();
+  check('decision', cur().decision, 'UNKNOWN');
+
+  console.log('\n[5] response.created/model and response.completed/model are authoritative');
+  nextBody = named('response.created', { response: { model: 'gpt-5-6-thinking' } })
+    + named('response.completed', { response: { model: 'gpt-5-6-instant' } }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c5'));
+  await sleep();
+  check('completed outranks created => routed', cur().decision, 'ROUTED');
+  check('decisive effective', cur().effective, 'gpt-5-6-instant');
+  ok('both authoritative values retained in raw evidence', cur().evidence.filter((x) => x.category === 'effective' && x.identity).length >= 2);
+
+  console.log('\n[6] completed response mismatch alone => ROUTED');
+  nextBody = named('response.completed', { response: { model: 'gpt-5-6-instant' } }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c6'));
+  await sleep();
+  check('decision', cur().decision, 'ROUTED');
+  check('source', ev('response.model').source, 'SSE');
+
+  console.log('\n[7] unknown model field is retained and can make result suspicious');
+  nextBody = sse({ routing_debug: { mystery_model: 'gpt-4o', model_experience: 'thinking' } }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c7'));
+  await sleep();
+  check('decision', cur().decision, 'SUSPICIOUS');
+  check('unknown category', ev('mystery_model').category, 'unknown');
+  check('raw value', ev('mystery_model').raw, 'gpt-4o');
+  ok('non-identity model metadata retained', ev('model_experience') && ev('model_experience').identity === false);
+
+  console.log('\n[8] nested historical request model is retained but excluded from verdict');
+  nextBody = DONE;
+  await send(req('gpt-5-6-thinking', 'c8', {
+    messages: [
+      { id: 'old-a', author: { role: 'assistant' }, metadata: { model_slug: 'gpt-4o' } },
+      { id: 'user-c8', author: { role: 'user' } }
+    ]
+  }));
+  await sleep();
+  check('decision', cur().decision, 'UNKNOWN');
+  const hist = ev('messages[0].metadata.model_slug');
+  ok('historical evidence retained', hist);
+  check('historical evidence relevant=false', hist.relevant, false);
+
+  console.log('\n[9] JSON response.model is authoritative');
+  nextType = 'application/json';
+  nextBody = JSON.stringify({ response: { model: 'gpt-5-6-instant' }, created_at: 1 });
+  await send(req('gpt-5-6-thinking', 'c9'), 'conversation');
+  await sleep();
+  check('decision', cur().decision, 'ROUTED');
+  check('response source', ev('response.model').source, 'response');
+
+  console.log('\n[10] model-related headers are preserved');
+  nextType = 'text/event-stream';
+  nextHeaders = { 'x-effective-model': 'gpt-5-6-instant' };
+  nextBody = DONE;
+  await send(req('gpt-5-6-thinking', 'c10'), 'f/conversation', { 'x-selected-model': 'gpt-5-6-thinking' });
+  await sleep();
+  check('header authoritative mismatch => routed', cur().decision, 'ROUTED');
+  const reqHeader = ev('request.header.x-selected-model');
+  const resHeader = ev('response.header.x-effective-model');
+  check('request header source', reqHeader.source, 'header');
+  check('request header category', reqHeader.category, 'requested');
+  check('response header category', resHeader.category, 'effective');
+
+  console.log('\n[11] Work handoff + WebSocket encoded SSE');
+  nextHeaders = {};
+  nextBody = sse({ type: 'stream_handoff', conversation_id: 'c11', turn_exchange_id: 'tex-11' });
+  await send(req('gpt-6-astra-wm', 'c11'));
+  await sleep();
+  check('handoff remains open', cur().closed, false);
   const ws = new window.WebSocket('wss://ws.chatgpt.com/v1/stream');
   const inner = sse({
-    conversation_id: 'c5',
-    message: {
-      id: 'asst-c5',
-      author: { role: 'assistant' },
-      content: { content_type: 'text', parts: ['回复'] },
-      metadata: { turn_exchange_id: 'tex-5', working_turn_id: 'turn-5', model_slug: 'gpt-6-astra-wm' }
-    }
-  }) + named('server_ste_metadata', {
-    model_slug: 'gpt-5-6-instant',
-    requested_model_experience: 'agentic',
-    did_auto_switch_to_reasoning: true
-  });
-  ws.emit(JSON.stringify({
-    type: 'conversation-turn-stream',
-    data: { encoded_item: Buffer.from(inner, 'utf8').toString('base64') }
-  }));
-  await sleep(300);
-  t = cur();
-  check('WebSocket 里的 STE 也抓到', t.exec, ['gpt-5-6-instant']);
-  check('回显是请求值', t.echo, ['gpt-6-astra-wm']);
-  check('自动转推理标志', t.flags.did_auto_switch_to_reasoning, true);
-  check('通道', t.transports, ['HTTP SSE', 'WebSocket']);
+    conversation_id: 'c11',
+    message: { id: 'a11', author: { role: 'assistant' }, metadata: { turn_exchange_id: 'tex-11', model_slug: 'gpt-6-astra-wm' } }
+  }) + named('server_ste_metadata', { model_slug: 'gpt-5-6-instant', requested_model_experience: 'agentic', server_ttfvt_ms: 55 });
+  ws.emit(JSON.stringify({ type: 'conversation-turn-stream', data: { encoded_item: Buffer.from(inner, 'utf8').toString('base64') } }));
+  await sleep();
+  check('websocket STE => routed', cur().decision, 'ROUTED');
+  ok('transport retained', cur().transports.includes('WebSocket'));
+  ok('SSE source retained', cur().evidence.some((x) => x.source === 'SSE' && x.category === 'effective'));
 
-  /* ---------- 6. 噪声隔离 ---------- */
-  console.log('\n[6] 噪声隔离');
-  nextBody = sse({
-    conversation_id: 'c6',
-    message: {
-      id: 'asst-c6',
-      author: { role: 'assistant' },
-      content: { content_type: 'text', parts: ['{"model_slug":"gpt-4o"} 这是正文里的字符串'] },
-      metadata: { parent_id: 'user-c6', model_slug: 'gpt-5-6-thinking' }
-    }
-  }) + named('server_ste_metadata', { model_slug: 'gpt-5-6-thinking' }) + DONE;
-  await askThinking('c6');
-  await sleep(300);
-  t = cur();
-  check('正文没污染执行桶', t.exec, ['gpt-5-6-thinking']);
-  check('正文没污染回显桶', t.echo, ['gpt-5-6-thinking']);
+  console.log('\n[12] JSON patch model path is classified by semantic destination');
+  nextBody = sse({ p: '/response/completed/model', o: 'replace', v: 'gpt-5-6-instant' }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c12'));
+  await sleep();
+  check('patch mismatch => routed', cur().decision, 'ROUTED');
+  const patch = ev('patch:/response/completed/model');
+  check('patch category', patch.category, 'effective');
 
-  nextType = 'application/json';
-  nextBody = JSON.stringify({ models: [{ slug: 'gpt-5-2', title: 'x' }] });
+  console.log('\n[13] equal-rank final evidence conflict => SUSPICIOUS');
+  nextBody = named('response.completed', { response: { completed: { model: 'gpt-5-6-instant' }, final: { model: 'gpt-5-5-mini' } } }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c13'));
+  await sleep();
+  check('same authority conflict', cur().decision, 'SUSPICIOUS');
+
+  console.log('\n[14] canonicalization does not merge model families/modes');
+  nextBody = named('response.completed', { response: { model: 'gpt-5-6-thinking-mini' } }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c14'));
+  await sleep();
+  check('mini remains distinct', cur().decision, 'ROUTED');
+  check('mini canonical remains distinct', cur().effectiveCanonical, 'gpt-5-6-thinking-mini');
+
+  console.log('\n[15] XHR resume stream contributes evidence to the current turn');
+  nextType = 'text/event-stream';
+  nextBody = sse({ type: 'stream_handoff', conversation_id: 'c15', turn_exchange_id: 'tex-15' });
+  await send(req('gpt-5-6-thinking', 'c15'));
+  await sleep();
+  const xhr = new window.XMLHttpRequest();
+  xhr.open('GET', '/backend-api/f/conversation/c15/stream_status');
+  xhr._responseHeaders = { 'content-type': 'text/event-stream', 'x-effective-model': 'gpt-5-6-instant' };
+  xhr.responseText = named('response.completed', { response: { model: 'gpt-5-6-instant' } });
+  xhr.send();
+  xhr.complete();
+  await sleep();
+  check('XHR resume routes', cur().decision, 'ROUTED');
+  ok('XHR/resume evidence retained', cur().transports.includes('stream_status'));
+  ok('XHR response header retained', cur().evidence.some((x) => x.path === 'response.header.x-effective-model'));
+
+  console.log('\n[16] noise endpoints do not create turns');
   const before = cur().n;
+  nextType = 'application/json'; nextBody = '{"ok":true}';
+  await window.fetch('/backend-api/f/conversation/prepare', { method: 'POST', body: JSON.stringify({ model: 'gpt-4o' }) });
   await window.fetch('/backend-api/models');
-  await sleep(200);
-  check('/backend-api/models 不建记录', cur().n, before);
+  await sleep();
+  check('current turn unchanged', cur().n, before);
 
-  /* ---------- 7. 真实抓到的形态（chat 窗口实测） ---------- */
-  console.log('\n[7] 真实形态：type=server_ste_metadata + metadata.model_slug');
-  nextType = 'text/event-stream';
-  nextBody =
-    'event: delta_encoding\ndata: "v1"\n\n' +
-    sse({ v: { conversation_id: 'r1', message: {
-      id: 'asst-r1', author: { role: 'assistant' },
-      content: { content_type: 'text', parts: ['正文'] },
-      metadata: {
-        parent_id: 'user-r1',
-        model_slug: 'gpt-5-6-thinking',
-        resolved_model_slug: 'gpt-5-6-thinking',
-        default_model_slug: 'gpt-5-6-thinking',
-        model_switcher_deny: {}
-      } } } }) +
-    sse({ type: 'server_ste_metadata', metadata: {
-      model_slug: 'gpt-5-6-thinking',
-      requested_model_experience: 'thinking',
-      did_auto_switch_to_reasoning: false,
-      is_autoswitcher_enabled: false,
-      auto_switcher_race_winner: null,
-      cluster_region: 'westus3'
-    } }) +
-    sse({ type: 'message_stream_complete', conversation_id: 'r1' }) + DONE;
-  await send('f/conversation', {
-    model: 'gpt-5-6-thinking',
-    conversation_id: 'r1',
-    messages: [{ id: 'user-r1', author: { role: 'user' } }]
-  });
-  await sleep(300);
-  t = cur();
-  check('执行 = STE 的 metadata.model_slug', t.exec, ['gpt-5-6-thinking']);
-  check('回显收 message 侧的 slug', t.echo, ['gpt-5-6-thinking']);
-  check('STE 字段', t.flags, {
-    requested_model_experience: 'thinking',
-    did_auto_switch_to_reasoning: false,
-    is_autoswitcher_enabled: false,
-    auto_switcher_race_winner: null,
-    cluster_region: 'westus3'
-  });
-  check('状态', t.state, '已确认执行模型');
-  console.log('         事件名 ' + JSON.stringify(t.events));
+  console.log('\n[17] snapshot only exposes the current turn');
+  nextType = 'text/event-stream'; nextBody = DONE;
+  for (let i = 0; i < 8; i++) await send(req('gpt-5-6-thinking', 'z' + i));
+  await sleep();
+  check('one public turn', latest().turns.length, 1);
+  check('snapshot schema', latest().v, 3);
 
-  /* ---------- 8. 真实形态下的重路由 ---------- */
-  console.log('\n[8] 真实形态 + 被重路由');
-  nextBody =
-    sse({ v: { conversation_id: 'r2', message: {
-      id: 'asst-r2', author: { role: 'assistant' },
-      metadata: { parent_id: 'user-r2', model_slug: 'gpt-5-6-thinking' } } } }) +
-    sse({ type: 'server_ste_metadata', metadata: {
-      model_slug: 'gpt-5-6-instant',
-      requested_model_experience: 'thinking',
-      did_auto_switch_to_reasoning: true,
-      is_autoswitcher_enabled: true,
-      auto_switcher_race_winner: 'instant'
-    } }) + DONE;
-  await send('f/conversation', {
-    model: 'gpt-5-6-thinking',
-    conversation_id: 'r2',
-    messages: [{ id: 'user-r2', author: { role: 'user' } }]
-  });
-  await sleep(300);
-  t = cur();
-  check('执行 ≠ 请求，抓到了重路由', t.exec, ['gpt-5-6-instant']);
-  check('回显还是请求值（正是它骗人的地方）', t.echo, ['gpt-5-6-thinking']);
-  check('竞速胜出方', t.flags.auto_switcher_race_winner, 'instant');
+  console.log('\n[18] lower authoritative tier disagreeing => SUSPICIOUS (not silently MATCH)');
+  nextType = 'text/event-stream'; nextHeaders = {};
+  nextBody = named('server_ste_metadata', { model_slug: 'gpt-5-6-thinking', requested_model_experience: 'thinking', server_ttfvt_ms: 1 })
+    + named('response.completed', { response: { model: 'gpt-5-5-mini' } }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c18'));
+  await sleep();
+  check('cross-tier conflict', cur().decision, 'SUSPICIOUS');
+  check('display still from top tier', cur().effective, 'gpt-5-6-thinking');
 
-  /* ---------- 9. delta patch 改写 model_slug ---------- */
-  console.log('\n[9] patch 形态：model_slug 在 p 的值里而不是键名');
-  nextBody =
-    sse({ v: { conversation_id: 'r3', message: {
-      id: 'asst-r3', author: { role: 'assistant' },
-      metadata: { parent_id: 'user-r3', model_slug: 'gpt-5-6-thinking' } } } }) +
-    sse({ p: '/message/metadata/model_slug', o: 'replace', v: 'gpt-5-6-instant' }) + DONE;
-  await send('f/conversation', {
-    model: 'gpt-5-6-thinking',
-    conversation_id: 'r3',
-    messages: [{ id: 'user-r3', author: { role: 'user' } }]
-  });
-  await sleep(300);
-  t = cur();
-  check('按键名找会漏掉的 patch 值也收到了', t.echo, ['gpt-5-6-thinking', 'gpt-5-6-instant']);
+  console.log('\n[19] MATCH with another model in non-authoritative evidence => matchUncertain');
+  nextBody = named('response.completed', { response: { model: 'gpt-5-6-thinking' } }) + sse({ some_new_field: { model: 'gpt-5-5-mini' } }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c19'));
+  await sleep();
+  check('decision', cur().decision, 'MATCH');
+  check('match uncertain', cur().matchUncertain, true);
+  nextBody = named('response.completed', { response: { model: 'gpt-5-6-thinking' } }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c19b'));
+  await sleep();
+  check('clean match not uncertain', cur().matchUncertain, false);
 
+  console.log('\n[20] model-adjacent keys are shown but never feed the verdict');
+  nextBody = sse({ conversation_id: 'c20', model_response_contracts: ['markdown', 'citations_v2'], model_config: { name: 'json_schema' } }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c20'));
+  await sleep();
+  check('not suspicious', cur().decision, 'UNKNOWN');
+  check('adjacent category', ev('model_response_contracts[0]').category, 'adjacent');
+  check('adjacent not identity', ev('model_config.name').identity, false);
 
-  /* ---------- 11. 兜底通道绝不建记录（v0.5.0 的回归） ---------- */
-  console.log('');
-  console.log('[11] 噪声请求不能挤掉当前轮');
-  nextType = 'text/event-stream';
-  nextBody = sse({ type: 'server_ste_metadata', metadata: { model_slug: 'gpt-5-6-thinking' } }) + DONE;
-  await send('f/conversation', {
-    model: 'gpt-5-6-thinking',
-    conversation_id: 'z1',
-    messages: [{ id: 'user-z1', author: { role: 'user' } }]
-  });
-  await sleep(300);
-  const nBefore = cur().n;
-  const execBefore = cur().exec.slice();
+  console.log('\n[21] unanchored (approx) evidence never decides');
+  nextBody = sse({ type: 'stream_handoff', conversation_id: 'c21', turn_exchange_id: 'tex-21' });
+  await send(req('gpt-5-6-thinking', 'c21'));
+  await sleep();
+  const ws21 = new window.WebSocket('wss://ws.chatgpt.com/v1/stream');
+  ws21.emit(JSON.stringify({ type: 'server_ste_metadata', model_slug: 'gpt-5-5-mini', requested_model_experience: 'x', server_ttfvt_ms: 1 }));
+  await sleep();
+  check('approx STE does not affect verdict', cur().decision, 'UNKNOWN');
+  check('approx STE does not mark uncertainty', cur().matchUncertain, false);
+  check('no effective from approx', cur().effective, '');
+  check('approx retained', cur().evidence.some((x) => x.approx && x.raw === 'gpt-5-5-mini'), true);
 
-  nextType = 'application/json';
-  nextBody = '{"ok":true}';
-  // prepare 带 model 字段，最容易被误当成一次发送
-  await window.fetch('/backend-api/f/conversation/prepare', { method: 'POST', body: JSON.stringify({ model: 'gpt-5-5-instant' }) });
-  await window.fetch('/ces/v1/m', { method: 'POST', body: JSON.stringify({ model: 'noise' }) });
-  await window.fetch('/backend-api/sentinel/ping', { method: 'POST', body: '{}' });
-  await window.fetch('/backend-api/settings/user');
-  await sleep(300);
-  check('噪声请求没建新记录', cur().n, nBefore);
-  check('当前轮的执行模型没被冲掉', cur().exec, execBefore);
-  check('请求模型还在', cur().requested, 'gpt-5-6-thinking');
+  console.log('\n[22] Work: lone STE frame anchored by handoff topic_id');
+  nextBody = sse({ type: 'stream_handoff', conversation_id: 'c22', turn_exchange_id: 'tex-22',
+    options: [{ type: 'subscribe_ws_topic', topic_id: 'conversation-turn-tex-22' }] });
+  await send(req('gpt-6-astra-wm', 'c22'));
+  await sleep();
+  const ws22 = new window.WebSocket('wss://ws.chatgpt.com/p13/ws/user/u');
+  const inner22 = named('server_ste_metadata', { model_slug: 'gpt-5-6-instant', requested_model_experience: 'agentic', server_ttfvt_ms: 9 });
+  ws22.emit(JSON.stringify({ topic_id: 'conversation-turn-tex-22', type: 'message', data: { encoded_item: inner22 } }));
+  await sleep();
+  check('topic-anchored STE routes', cur().decision, 'ROUTED');
+  check('not approx', cur().evidence.find((x) => x.raw === 'gpt-5-6-instant').approx, false);
 
-  /* ---------- 10. 只带当前一轮 ---------- */
-  console.log('\n[10] 不堆历史');
-  nextBody = DONE;
-  for (let i = 0; i < 12; i++) await askThinking('x' + i);
-  await sleep(300);
-  check('快照只带一轮', latest().turns.length, 1);
+  console.log('\n[23] canonicalization: version keywords need a number; dots compare equal to dashes');
+  nextBody = named('response.completed', { response: { model: 'gpt-5-6-reviewer' } }) + DONE;
+  await send(req('gpt-5-6', 'c23'));
+  await sleep();
+  check('reviewer is not a version suffix', cur().decision, 'ROUTED');
+  nextBody = named('response.completed', { response: { model: 'gpt-5.6-thinking' } }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c23b'));
+  await sleep();
+  check('dot vs dash => MATCH', cur().decision, 'MATCH');
 
-  console.log(failed ? '\n' + failed + ' 项未通过\n' : '\n全部通过\n');
+  console.log('\n[24] image-generation messages are sub-dispatch, not judged');
+  nextBody = sse({ conversation_id: 'c24', message: { id: 'a24', author: { role: 'tool' }, metadata: { parent_id: 'user-c24', image_generation: { model: 'gpt-image-2' } } } }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c24'));
+  await sleep();
+  check('image message sub-dispatch', ev('image_generation.model').category, 'subdispatch');
+  check('no effective', cur().effective, '');
+
+  console.log('\n[25] patch values are re-rooted under their path (object v / parent path)');
+  nextBody = sse({ p: '/response/completed/model_info', o: 'replace', v: { slug: 'gpt-5-5-mini' } }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c25'));
+  await sleep();
+  check('object patch captured', cur().decision, 'ROUTED');
+  ok('patch path kept', ev('patch:/response/completed/model_info.slug'));
+  nextBody = sse({ p: '/response/completed', o: 'add', v: { model: 'gpt-5-5-mini' } }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c25b'));
+  await sleep();
+  check('parent-path patch captured', cur().decision, 'ROUTED');
+
+  console.log('\n[26] resolved_* is unknown, never decisive');
+  nextBody = named('server_ste_metadata', { resolved_model_slug: 'gpt-5-5-mini', requested_model_experience: 't', server_ttfvt_ms: 1 }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c26'));
+  await sleep();
+  check('resolved category', ev('resolved_model_slug').category, 'unknown');
+  check('not routed', cur().decision, 'SUSPICIOUS');
+
+  console.log('\n[27] evidence carries endpoint api');
+  nextBody = named('response.completed', { response: { model: 'gpt-5-6-thinking' } }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c27'));
+  await sleep();
+  check('api on evidence', ev('response.model').api, 'f/conversation');
+
+  console.log('\n[28] frames naming another window\'s conversation are dropped');
+  nextBody = named('response.completed', { response: { model: 'gpt-5-6-thinking' } }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c28'));
+  await sleep();
+  const ws28 = new window.WebSocket('wss://ws.chatgpt.com/p13/ws/user/u');
+  ws28.emit(JSON.stringify({ type: 'conversation-update', payload: { conversation_id: 'other-window', update_content: {
+    message: { id: 'm-sol', author: { role: 'assistant' }, metadata: { model_slug: 'gpt-5.6-sol-wm' } } } } }));
+  await sleep();
+  check('still clean MATCH', cur().decision, 'MATCH');
+  check('no uncertainty mark', cur().matchUncertain, false);
+  ok('foreign evidence not attached', !cur().evidence.some((x) => x.raw === 'gpt-5.6-sol-wm'));
+
+  console.log('\n[29] own-conversation update with image-gen auto combo is not a downgrade');
+  nextBody = named('response.completed', { response: { model: 'gpt-5-6-thinking' } }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c29'));
+  await sleep();
+  const ws29 = new window.WebSocket('wss://ws.chatgpt.com/p13/ws/user/u');
+  ws29.emit(JSON.stringify({ type: 'conversation-update', payload: { conversation_id: 'c29', update_content: { messages: [{
+    id: 'm-img', author: { role: 'assistant' }, metadata: { parent_id: 'user-c29',
+      requested_model_slug: 'gpt-5-4-auto-thinking', default_model_slug: 'gpt-5-6-thinking',
+      resolved_model_slug: 'gpt-5-4-auto-thinking', model_slug: 'gpt-5-4-thinking' } }] } } }));
+  await sleep();
+  check('verdict unchanged', cur().decision, 'MATCH');
+  check('no uncertainty mark', cur().matchUncertain, false);
+  check('combo shown as sub-dispatch', ev('payload.update_content.messages[0].metadata.model_slug').category, 'subdispatch');
+
+  console.log('\n[30] a differing echo that is NOT the auto combo still marks MATCH?');
+  nextBody = named('response.completed', { response: { model: 'gpt-5-6-thinking' } })
+    + sse({ message: { id: 'a30', author: { role: 'assistant' }, metadata: { parent_id: 'user-c30', model_slug: 'gpt-5-5-mini' } } }) + DONE;
+  await send(req('gpt-5-6-thinking', 'c30'));
+  await sleep();
+  check('MATCH', cur().decision, 'MATCH');
+  check('marked', cur().matchUncertain, true);
+
+  console.log(failed ? `\n${failed} test(s) failed\n` : '\nAll tests passed\n');
   process.exit(failed ? 1 : 0);
 })();

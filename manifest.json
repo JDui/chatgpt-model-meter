@@ -1,34 +1,22 @@
 {
   "manifest_version": 3,
   "name": "模型 · 额度监测 for ChatGPT",
-  "version": "0.7.4",
-  "description": "在 ChatGPT 网页左上角显示 5 小时 / 7 天剩余额度，并核对请求 model 与服务端 STE 报告的 model_slug 是否一致（chat 与 work 通用）。",
+  "version": "0.8.6",
+  "description": "在 ChatGPT 网页左上角显示 5 小时 / 7 天剩余额度，并收集本轮全部 model evidence，区分 requested/effective/auxiliary/unknown 后判断模型路由。",
   "minimum_chrome_version": "111",
   "content_scripts": [
     {
-      "matches": [
-        "https://chatgpt.com/*"
-      ],
-      "js": [
-        "bridge.js",
-        "model.js"
-      ],
+      "matches": ["https://chatgpt.com/*"],
+      "js": ["bridge.js", "model.js"],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
-      "matches": [
-        "https://chatgpt.com/*"
-      ],
-      "js": [
-        "widget.js",
-        "model-ui.js"
-      ],
+      "matches": ["https://chatgpt.com/*"],
+      "js": ["widget.js", "model-ui.js"],
       "run_at": "document_start",
       "world": "ISOLATED"
     }
   ],
-  "permissions": [
-    "storage"
-  ]
+  "permissions": ["storage"]
 }

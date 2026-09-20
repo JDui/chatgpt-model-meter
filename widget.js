@@ -522,8 +522,8 @@
 
       #${WIDGET_ID} .yy-cum-settings-panel {
         position: absolute;
-        top: calc(100% + 8px);
-        left: 0;
+        top: 0;
+        left: calc(100% + 8px);
         width: 304px;
         box-sizing: border-box;
         padding: 12px;
@@ -537,15 +537,15 @@
         line-height: 1.2;
       }
 
-      /* 面板和主卡片之间保留 8px 视觉间距，但用透明命中区桥起来，
-         避免鼠标穿过缝隙时触发 auto-hide。 */
+      /* 设置面板固定从主卡片右侧弹出。两者之间保留 8px 视觉间距，
+         用透明命中区横向桥接，避免鼠标穿过缝隙时触发 auto-hide。 */
       #${WIDGET_ID} .yy-cum-settings-panel::before {
         content: "";
         position: absolute;
-        left: 0;
-        right: 0;
-        top: -9px;
-        height: 9px;
+        left: -9px;
+        top: 0;
+        bottom: 0;
+        width: 9px;
         pointer-events: auto;
       }
 
@@ -859,6 +859,21 @@
     return true;
   }
 
+  // 命中测试必须跳过挂件自己：卡片一旦压在侧栏右边缘上（比如侧栏展开时卡片还停在收起态的位置），
+  // elementFromPoint 打到的是卡片，侧栏会被误判为“不可见”，测量失败后卡片就永远停在原地。
+  function firstHitOutsideWidget(x, y) {
+    try {
+      if (typeof document.elementsFromPoint === 'function') {
+        for (const hit of document.elementsFromPoint(x, y)) {
+          if (!widget || (hit !== widget && !widget.contains(hit))) return hit;
+        }
+        return null;
+      }
+      const hit = document.elementFromPoint(x, y);
+      return hit && widget && (hit === widget || widget.contains(hit)) ? null : hit;
+    } catch { return null; }
+  }
+
   function ownsVisibleRightEdge(el, rect) {
     // ChatGPT 收起侧栏时，DOM 中可能仍保留一个“展开态”的宽侧栏节点。
     // 只接受真正占据屏幕像素的候选，避免挂件继续停在旧的展开位置。
@@ -870,7 +885,7 @@
     let owned = 0;
     for (const y of ys) {
       try {
-        const hit = document.elementFromPoint(x, y);
+        const hit = firstHitOutsideWidget(x, y);
         if (hit && (hit === el || el.contains(hit))) owned += 1;
       } catch {}
     }
@@ -901,7 +916,7 @@
     // 再从屏幕最左侧实际命中的元素向上爬祖先，兼容 ChatGPT 改 class / data-testid。
     for (const y of [96, Math.floor(window.innerHeight / 2), Math.max(96, window.innerHeight - 96)]) {
       try {
-        let node = document.elementFromPoint(8, y);
+        let node = firstHitOutsideWidget(8, y);
         while (node && node !== document.documentElement) {
           collectSidebarCandidate(node, candidates);
           node = node.parentElement;
@@ -915,10 +930,20 @@
     return Math.max(...candidates.map(({ rect }) => rect.right));
   }
 
+  let sidebarMissCount = 0;
+
   function updatePosition() {
     if (!widget) return;
     const sidebarRight = getSidebarRight();
-    const left = Math.round(Math.max(0, sidebarRight) + 12);
+    // DOM 瞬时变化导致侧栏测量失败时，先保持当前位置，不要跳回页面最左侧。
+    // 但连续几次都测不到（窄窗口下侧栏整个消失），说明侧栏真的不在了，贴回左边。
+    if (!(sidebarRight > 0)) {
+      sidebarMissCount += 1;
+      if (sidebarMissCount >= 3) widget.style.left = '12px';
+      return;
+    }
+    sidebarMissCount = 0;
+    const left = Math.round(sidebarRight + 12);
     widget.style.left = `${left}px`;
   }
 

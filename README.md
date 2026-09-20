@@ -1,50 +1,136 @@
-# 模型 · 额度监测 for ChatGPT v0.7.4
+# 模型 · 额度监测 for ChatGPT v0.8.6
 
-> 非官方第三方扩展，与 OpenAI 无隶属、合作或官方认可关系。
-> Unofficial third-party extension. Not affiliated with or endorsed by OpenAI.
+> 非官方第三方扩展，跟 OpenAI 没有任何关系。
+> Unofficial third-party extension. Not affiliated with OpenAI.
 
-在 chatgpt.com 左上角显示 Work / Codex 的 5 小时、7 天剩余额度，以及请求 model 与服务端 STE 遥测报告的 model_slug。
+这个扩展在 chatgpt.com 左上角放一张小卡片，只做两件事：
 
+- 显示 Work / Codex 的 5 小时、7 天剩余额度
+- 每发一条消息，核对你选的模型和服务端报上来的模型是不是同一个
 
-## Language
-
-The gear menu now includes **Language: Auto / 中文 / English**. Auto follows the browser language: Chinese browsers use Chinese; other languages use English.
-
-## v0.7.1 修复
-
-- 不再假定 `primary_window = 5h`、`secondary_window = 7d`。
-- 现在按 `limit_window_seconds` 识别额度窗口：`18000` 秒 = 5h，`604800` 秒 = 7d。
-- 兼容 Pro / Plus 等账号把周额度放进 `primary_window`，或只返回周额度的情况。
-
-## v0.7.0 新增
-
-右上角齿轮 → 显示设置：
-
-- **显示模型路由**：默认开启。关闭后隐藏 req / run 区域并暂停模型流解析，只保留额度条。
-- **默认隐藏**：默认关闭。开启后卡片平时只显示 `Work / Codex` 小块；鼠标移上去展开，移开自动收回。
+Chat 和 Work 窗口都能用。界面支持中文和英文，在齿轮 → Language 里切换，Auto 会跟随浏览器语言。
 
 ## 安装
 
-1. 解压 ZIP。
-2. 打开 `chrome://extensions/`。
-3. 开启「开发者模式」。
-4. 选择「加载已解压的扩展程序」。
-5. 选择解压后的 `chatgpt-model-meter-v0.7.3` 文件夹。
-6. 停用旧版模型/额度插件，避免重复网络钩子。
-7. 刷新 ChatGPT 页面。
+1. 下载这个仓库（Code → Download ZIP）并解压。
+2. 打开 `chrome://extensions/`，打开右上角的「开发者模式」。
+3. 点「加载已解压的扩展程序」，选择包含 `manifest.json` 的那一层文件夹。
+4. 如果装过旧版，先把旧版移除。`ChatGPT Codex Usage Meter` 和 `Work 模型证据核对` 这两个老扩展也要停用，否则会出现两张卡片。
+5. 刷新 chatgpt.com。这一步一定要做：插件必须在页面建立 WebSocket 之前就装好，否则 Work 窗口一条数据都抓不到。
 
-## 模型标识说明
+## 怎么看卡片
 
-`req` 是网页请求体发出的 model；`run` 是流末尾 `server_ste_metadata.model_slug`。两者不一致只表示“请求标识与 STE 报告标识不一致”，不能单独证明服务器内部实际加载了哪套权重。
+```
+req  gpt-5-6-thinking
+run  gpt-5-6-thinking      work  MATCH
+```
 
-本扩展不上传对话内容，不申请 Cookie、debugger 或历史记录权限。
+- **req**：这一轮你请求的模型，也就是网页发出的请求体里的 `model`
+- **run**：服务端报告这一轮实际执行的模型
+- **work / chat**：服务端遥测里的 `product_experience`，由服务端自己报告，不是插件根据接口猜的
 
+最右边是判定结果：
 
-## 版本
+| 判定 | 意思 |
+|---|---|
+| `MATCH` | run 和 req 是同一个模型 |
+| `MATCH?` | run 和 req 一样，但这一轮里别处还出现过另一个模型名，建议展开看看 |
+| `ROUTED` | run 和 req 不一样，模型被换了 |
+| `SUS` | 证据互相矛盾：两处权威字段报了不同的模型，或者别的模型只出现在不权威的位置 |
+| `?` | 这一轮已经结束，但没有拿到可用的执行模型 |
+| `···` | 还在等结果。Work 窗口的执行模型要等整轮结束才会发出，长任务可能要等几分钟 |
 
-v0.7.3 — 默认隐藏模式新增约 5px 外沿缓冲区；鼠标只离开展开卡片/设置面板几像素时保持展开，继续移远后再收起。
+`MATCH?` 故意不在卡片上写出那个模型名。OpenAI 的内部代号一直在换，插件没法替你判断 luna、sol 这类名字意味着什么，所以只负责提醒你点开看一眼。
 
-v0.7.2 — 修复默认隐藏模式下设置面板缝隙误收起。
+点卡片可以展开这一轮的详情，包括：界面上显示的模型名、推理强度、产品线、是否自动切换、是否联网、集群、首字延迟、走的是哪个接口。服务端报了哪些字段就显示哪些。
 
+## Debug / Raw Evidence
 
-v0.7.4 — Added Auto / 中文 / English interface language support.
+这一轮里所有带 `model` 字样的字段都会被抓下来，每个字段一张小卡片。OpenAI 经常改字段名、换接口，与其猜哪个位置对，不如全部列出来让你自己看。
+
+卡片左边色条的含义：
+
+- **绿**：权威的执行模型字段，判定只看这一类。例如 STE 里的 `model_slug`、`response.completed.model`
+- **蓝**：请求侧。包括请求体里的 `model`，以及流里回显的 `message.metadata.model_slug`。回显正常情况下就等于你的请求；如果回显出另一个模型，卡片会变成 `MATCH?`
+- **黄**：辅助模型，比如草稿、安全检查、工具调用用到的模型
+- **灰色实线**：插件还没见过的 model 字段，先列出来备查
+- **灰色虚线**：名字里带 model、但值不是模型名的字段，比如 `model_response_contracts`，只展示不参与判定
+- **黄色虚线**：生图这类系统子调用自带的模型。例如生图时出现的 `gpt-5-4-auto-thinking → gpt-5-4-thinking`，是那次子调用自己选的模型，不代表你这一轮被降级
+
+每张卡片的第二行写着来源、类别和接口。带 `≈` 的卡片表示插件没能把这一帧对应到这一轮，这类卡片只展示，不参与判定，也不会触发 `MATCH?`。
+
+面板里的文字可以直接选中复制。选中期间面板会暂停刷新，不会把你的选区冲掉。「复制全部」会把判定、详情、全部证据和事件名整理成一份纯文本。
+
+## 判定规则
+
+**执行模型只认权威字段。** 优先级从高到低依次是：`server_ste_metadata` → `response.completed` / final → `response.created`。
+
+**`message.metadata.model_slug` 不算执行证据。** 它是请求的回显，整条流里都等于你请求的值。如果拿它当执行模型，结果永远是 MATCH，什么也测不出来。
+
+**不同层级的权威字段说法不一致，判为 SUS。** 例外：同一个响应的 created 和 completed 不一致时，只是同一次响应的前后两个阶段，以 completed 为准，只在结果后面打问号。
+
+**比较模型名之前会先做规整。** 去掉日期、`-v2`、`-snapshot-2` 这类后缀，`5.6` 和 `5-6` 视为同一个模型；但 `-mini`、`-thinking`、`-instant` 这些不会被合并。`-reviewer` 这类普通单词也不会被当成版本号去掉。
+
+**`resolved_model_slug` 的含义还没确认。** 它归在 unknown 类里：可以触发 `MATCH?`，但不会决定判定结果。
+
+## 只看本窗口
+
+`ws.chatgpt.com` 是用户级的常驻连接，同一个用户下所有窗口的更新都走这一条。插件按下面两条规则过滤：
+
+- 帧里写明了别的会话：直接丢掉，不会出现在面板里
+- 帧里没写会话，也对不上这一轮：标上 `≈`，只展示
+
+所以同时开好几个窗口测试，彼此不会互相干扰。
+
+## 两种窗口分别怎么抓
+
+Chat 窗口的回复直接从 HTTP SSE 流回来，执行模型就在流的末尾。
+
+Work 窗口大多会移交给后台处理：
+
+```
+POST /backend-api/f/conversation
+  └ SSE: {"type":"stream_handoff",
+          "turn_exchange_id":"…",
+          "options":[{"type":"subscribe_ws_topic","topic_id":"conversation-turn-…"}, …]}
+
+后续内容改走 ws.chatgpt.com
+  └ 帧里 "encoded_item":"data: {…}"   ← SSE 以字符串形式套在帧里
+      └ {"type":"server_ste_metadata","metadata":{"model_slug":"…", …}}
+```
+
+续流地址由 `stream_handoff` 动态下发，所以插件不按固定路径识别，只按 content-type 识别。
+
+把一帧对应到某一轮，依次尝试这些线索：`turn_exchange_id` → `working_turn_id` → `parent_id` → handoff 下发的 `topic_id` → 帧里写明的会话中唯一一轮还没结束的。如果都对不上，就打 `≈`，不会按时间顺序去猜。
+
+## 抓不到东西的时候
+
+- **卡片不出现**：扩展没装上，或者装完没刷新页面
+- **额度显示 `--`**：当前登录的用户读不到 `/backend-api/codex/usage`，点一下卡片空白处重试
+- **一直显示 `···`**：回复还没结束
+- **结束了还是 `?`**：这条链路没发权威字段，或者字段改名了。展开 Debug，点「复制全部」，把复制出来的文本发到 issue 里。从事件名和字段路径就能看出该改 `model.js` 的哪几行
+
+## 它能说明什么
+
+卡片上的每个模型名都是服务端自己报的。插件能告诉你三件事：你要的是什么，服务端说它用的是什么，这两者对不对得上。服务端内部到底跑的是哪套权重，网页端看不到，插件也看不到。
+
+如果名字对得上，输出却明显不像这个模型，就只能靠你自己判断了。把所有证据都列在 Debug 里，就是为了这种时候用。
+
+## 隐私
+
+- 只在 chatgpt.com 上运行，只申请了 `storage` 权限，用来保存卡片外观和展开状态
+- 不上传任何数据，没有后台服务
+- 查询额度时，插件会借用页面自己请求里带的登录头（Authorization），只用来请求同站的额度接口。它不会写进存储，也不会离开页面
+- 不保存对话内容。证据只保留当前这一轮，放在内存里，刷新页面就清空
+
+## 版本记录
+
+- **v0.8.6**：只看本窗口；生图子调用不再误判为降级；Debug 面板可以选中文字，新增「复制全部」；修复卡片压住侧栏边缘后位置卡死、不再跟随侧栏的问题
+- **v0.8.5**：新增 `MATCH?`；不同层级权威字段冲突时判 SUS；`≈` 证据不参与判定；修复 `-reviewer` 这类名字被误当成版本后缀；`5.6` 与 `5-6` 视为同一模型；补全 patch 解析；证据卡片显示接口
+- **v0.8.4**：全量抓取 model 字段并分类判定，新增 Raw Evidence 面板
+- **v0.7.4**：中英文界面
+- **v0.7.3**：默认隐藏模式增加约 5px 的外沿缓冲
+- **v0.7.2**：修复默认隐藏模式下，设置面板的缝隙会导致卡片误收起
+- **v0.7.1**：额度窗口改为按 `limit_window_seconds` 识别，兼容周额度放在 `primary_window` 的情况
+- **v0.7.0**：新增显示设置，可以关闭模型路由（只保留额度条），也可以开启默认隐藏
+- **v0.6.0**：首版
