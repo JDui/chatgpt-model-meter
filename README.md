@@ -1,4 +1,4 @@
-# 模型 · 额度监测 for ChatGPT v0.8.6
+# 模型 · 额度监测 for ChatGPT v0.8.7
 
 > 非官方第三方扩展，跟 OpenAI 没有任何关系。
 > Unofficial third-party extension. Not affiliated with OpenAI.
