@@ -41,7 +41,7 @@
       textColor: '文字颜色', cardColor: '卡片颜色', opacity: '透明度',
       followTheme: '跟随主题', reset: '恢复默认', settings: '显示设置',
       collapse: '收纳', expand: '展开', resetPosition: '恢复自动跟随',
-      usageTitle: 'Work / Codex 剩余额度', remaining: '剩余', clickRefresh: '点击卡片立即刷新。',
+      usageTitle: '剩余额度', subscription: '订阅', remaining: '剩余', clickRefresh: '点击卡片立即刷新。',
       readError: '暂时读取不到额度', retry: '点击卡片重试。'
     },
     en: {
@@ -50,7 +50,7 @@
       textColor: 'Text color', cardColor: 'Card color', opacity: 'Opacity',
       followTheme: 'Follow theme', reset: 'Reset', settings: 'Display settings',
       collapse: 'Collapse', expand: 'Expand', resetPosition: 'Auto-follow sidebar',
-      usageTitle: 'Work / Codex remaining quota', remaining: 'remaining', clickRefresh: 'Click the card to refresh.',
+      usageTitle: 'Remaining quota', subscription: 'Subscription', remaining: 'remaining', clickRefresh: 'Click the card to refresh.',
       readError: 'Unable to read quota right now', retry: 'Click the card to retry.'
     }
   };
@@ -64,6 +64,14 @@
   function t(key) {
     const lang = resolvedLanguage();
     return I18N[lang][key] ?? I18N.en[key] ?? key;
+  }
+
+  function subscriptionName() {
+    const plan = typeof payload?.plan_type === 'string' ? payload.plan_type.trim() : '';
+    if (!plan) return t('subscription');
+    return plan.toLowerCase().split(/[\s_-]+/).map((word) =>
+      word.charAt(0).toUpperCase() + word.slice(1)
+    ).join(' ');
   }
 
   let payload = null;
@@ -809,7 +817,7 @@
     const header = document.createElement('div');
     header.className = 'yy-cum-header';
     header.innerHTML = `
-      <span class="yy-cum-title">Work / Codex</span>
+      <span class="yy-cum-title"></span>
       <span class="yy-cum-header-actions">
         <button class="yy-cum-collapse-button" type="button" aria-label="Collapse" aria-expanded="true" title="Collapse">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1051,6 +1059,8 @@
   function render() {
     if (!widget || !fiveHourValue || !weeklyValue) return;
 
+    const plan = subscriptionName();
+    widget.querySelector('.yy-cum-title').textContent = plan;
     const rateLimit = payload?.rate_limit;
     const { fiveHour, weekly } = classifyRateLimitWindows(rateLimit);
     fiveHourValue.hidden = remainingPercent(fiveHour) == null;
@@ -1063,12 +1073,11 @@
     widget.classList.toggle('yy-cum-error', Boolean(lastError && !payload));
     if (payload) {
       widget.classList.remove('yy-cum-loading');
-      const plan = payload.plan_type ? ` · ${payload.plan_type}` : '';
       const quotas = [
         !fiveHourValue.hidden && `5h ${t('remaining')} ${fiveHourValue.querySelector('.yy-cum-percent').textContent} · ${formatCountdown(fiveHour, true)}`,
         !weeklyValue.hidden && `7d ${t('remaining')} ${weeklyValue.querySelector('.yy-cum-percent').textContent} · ${formatCountdown(weekly)}`
       ].filter(Boolean);
-      widget.title = [`${t('usageTitle')}${plan}`, ...quotas, t('clickRefresh')].join('\n');
+      widget.title = [`${plan} · ${t('usageTitle')}`, ...quotas, t('clickRefresh')].join('\n');
     } else if (lastError) {
       widget.title = `${t('readError')}: ${lastError}\n${t('retry')}`;
     }
