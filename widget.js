@@ -41,7 +41,7 @@
       textColor: '文字颜色', cardColor: '卡片颜色', opacity: '透明度',
       followTheme: '跟随主题', reset: '恢复默认', settings: '显示设置',
       collapse: '收纳', expand: '展开', resetPosition: '恢复自动跟随',
-      usageTitle: 'Work / Codex 剩余额度', clickRefresh: '点击卡片立即刷新。',
+      usageTitle: 'Work / Codex 剩余额度', remaining: '剩余', clickRefresh: '点击卡片立即刷新。',
       readError: '暂时读取不到额度', retry: '点击卡片重试。'
     },
     en: {
@@ -50,7 +50,7 @@
       textColor: 'Text color', cardColor: 'Card color', opacity: 'Opacity',
       followTheme: 'Follow theme', reset: 'Reset', settings: 'Display settings',
       collapse: 'Collapse', expand: 'Expand', resetPosition: 'Auto-follow sidebar',
-      usageTitle: 'Work / Codex remaining quota', clickRefresh: 'Click the card to refresh.',
+      usageTitle: 'Work / Codex remaining quota', remaining: 'remaining', clickRefresh: 'Click the card to refresh.',
       readError: 'Unable to read quota right now', retry: 'Click the card to retry.'
     }
   };
@@ -71,6 +71,8 @@
   let widget = null;
   let fiveHourValue = null;
   let weeklyValue = null;
+  let compactFiveHour = null;
+  let compactWeekly = null;
   let settingsPanel = null;
   let settingsButton = null;
   let collapseButton = null;
@@ -95,7 +97,7 @@
   }
 
   function remainingPercent(windowData) {
-    if (!windowData || typeof windowData.used_percent !== 'number') return null;
+    if (!windowData || !Number.isFinite(windowData.used_percent)) return null;
     return clamp(Math.round((100 - windowData.used_percent) * 10) / 10, 0, 100);
   }
 
@@ -133,12 +135,25 @@
   function row(label) {
     const el = document.createElement('div');
     el.className = 'yy-cum-row';
+    el.dataset.window = label;
     el.innerHTML = `
       <span class="yy-cum-label">${label}</span>
       <span class="yy-cum-track"><span class="yy-cum-fill"></span></span>
       <span class="yy-cum-percent">--</span>
       <span class="yy-cum-reset">--</span>
     `;
+    return el;
+  }
+
+  function compactTrack(label) {
+    const el = document.createElement('div');
+    el.className = 'yy-cum-compact-track';
+    el.dataset.window = label;
+    el.hidden = true;
+    el.setAttribute('role', 'progressbar');
+    el.setAttribute('aria-valuemin', '0');
+    el.setAttribute('aria-valuemax', '100');
+    el.innerHTML = '<span class="yy-cum-fill"></span>';
     return el;
   }
 
@@ -182,6 +197,11 @@
     widget.style.setProperty('--yy-font-size', `${fontSize}px`);
     widget.dataset.autoHide = currentSettings.defaultHidden ? 'true' : 'false';
     widget.dataset.collapsed = currentSettings.collapsed ? 'true' : 'false';
+    if (currentSettings.collapsed && settingsPanel) {
+      settingsPanel.hidden = true;
+      settingsButton?.setAttribute('aria-expanded', 'false');
+      widget.classList.remove('yy-cum-settings-open');
+    }
     applyLanguage();
     updatePanelSide();
 
@@ -414,6 +434,9 @@
         --yy-text-color: #141414;
         --yy-font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         --yy-font-size: 13px;
+        --yy-five-hour-fill: linear-gradient(90deg, #467f88, #8bb6ad);
+        --yy-weekly-fill: linear-gradient(90deg, #77729c, #b3a5c9);
+        --yy-quota-track: rgba(99, 110, 139, .13);
         position: fixed;
         top: 10px;
         left: 232px;
@@ -441,7 +464,7 @@
       }
 
       #${WIDGET_ID}[data-auto-hide="true"]:not(:hover):not(.yy-cum-settings-open):not(.yy-cum-hover-buffer) {
-        width: 112px;
+        width: max-content;
         padding: 7px 10px;
       }
 
@@ -458,6 +481,9 @@
       }
 
       #${WIDGET_ID}[data-theme="dark"] {
+        --yy-five-hour-fill: linear-gradient(90deg, #6da5af, #a6c9bd);
+        --yy-weekly-fill: linear-gradient(90deg, #9691bd, #c5b5dc);
+        --yy-quota-track: rgba(168, 178, 204, .16);
         border-color: rgba(255,255,255,.14);
         box-shadow: 0 2px 10px rgba(0,0,0,.32);
       }
@@ -498,6 +524,7 @@
         font-weight: 700;
         letter-spacing: .01em;
         opacity: .88;
+        white-space: nowrap;
       }
 
       #${WIDGET_ID} .yy-cum-settings-button,
@@ -532,6 +559,11 @@
         display: block;
       }
 
+      #${WIDGET_ID} .yy-cum-row[hidden],
+      #${WIDGET_ID} .yy-cum-compact-track[hidden] {
+        display: none !important;
+      }
+
       #${WIDGET_ID} .yy-cum-row {
         display: grid;
         grid-template-columns: 22px minmax(0, 1fr) 40px 74px;
@@ -553,11 +585,40 @@
         height: 9px;
         overflow: hidden;
         border-radius: 999px;
-        background: color-mix(in srgb, currentColor 14%, transparent);
+        background: var(--yy-quota-track);
       }
 
-      @supports not (background: color-mix(in srgb, black 10%, transparent)) {
-        #${WIDGET_ID} .yy-cum-track { background: rgba(90,90,90,.16); }
+      #${WIDGET_ID} [data-window="5h"] {
+        --yy-quota-fill: var(--yy-five-hour-fill);
+      }
+
+      #${WIDGET_ID} [data-window="7d"] {
+        --yy-quota-fill: var(--yy-weekly-fill);
+      }
+
+      #${WIDGET_ID} .yy-cum-compact-track {
+        display: none;
+        position: absolute;
+        left: 14px;
+        right: 14px;
+        height: 3px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: var(--yy-quota-track);
+        pointer-events: none;
+      }
+
+      #${WIDGET_ID} .yy-cum-compact-track[data-window="5h"] {
+        top: 2px;
+      }
+
+      #${WIDGET_ID} .yy-cum-compact-track[data-window="7d"] {
+        bottom: 2px;
+      }
+
+      #${WIDGET_ID}[data-collapsed="true"] > .yy-cum-compact-track,
+      #${WIDGET_ID}[data-auto-hide="true"]:not(:hover):not(.yy-cum-settings-open):not(.yy-cum-hover-buffer) > .yy-cum-compact-track {
+        display: block;
       }
 
       #${WIDGET_ID} .yy-cum-fill {
@@ -565,8 +626,7 @@
         width: 0%;
         height: 100%;
         border-radius: inherit;
-        background: currentColor;
-        opacity: .72;
+        background: var(--yy-quota-fill);
         transition: width 220ms ease;
       }
 
@@ -628,7 +688,7 @@
         right: -9px;
       }
 
-      /* 手动收纳：折叠成只剩标题条，隐藏额度行 / 模型路由区块 / 设置面板。 */
+      /* 收纳栏保留标题和上下额度细条，设置入口只在展开时显示。 */
       #${WIDGET_ID}[data-collapsed="true"] {
         width: auto;
         padding: 8px 10px;
@@ -640,11 +700,9 @@
       }
 
       #${WIDGET_ID}[data-collapsed="true"] > .yy-cum-row,
-      #${WIDGET_ID}[data-collapsed="true"] > .yy-mum-block {
-        display: none !important;
-      }
-
-      #${WIDGET_ID}[data-collapsed="true"]:not(.yy-cum-settings-open) > .yy-cum-settings-panel {
+      #${WIDGET_ID}[data-collapsed="true"] > .yy-mum-block,
+      #${WIDGET_ID}[data-collapsed="true"] .yy-cum-settings-button,
+      #${WIDGET_ID}[data-collapsed="true"] > .yy-cum-settings-panel {
         display: none !important;
       }
 
@@ -767,6 +825,10 @@
       </span>
     `;
     root.appendChild(header);
+    compactFiveHour = compactTrack('5h');
+    compactWeekly = compactTrack('7d');
+    root.appendChild(compactFiveHour);
+    root.appendChild(compactWeekly);
     root.appendChild(row('5h'));
     root.appendChild(row('7d'));
 
@@ -948,6 +1010,20 @@
     reset.textContent = formatCountdown(windowData, primary);
   }
 
+  function setCompactTrack(track, windowData, label, primary = false) {
+    const remaining = remainingPercent(windowData);
+    track.hidden = remaining == null;
+    track.querySelector('.yy-cum-fill').style.width = `${remaining ?? 0}%`;
+    track.setAttribute('aria-label', `${label} ${t('remaining')}`);
+    if (remaining == null) {
+      track.removeAttribute('aria-valuenow');
+      track.removeAttribute('aria-valuetext');
+      return;
+    }
+    track.setAttribute('aria-valuenow', String(remaining));
+    track.setAttribute('aria-valuetext', `${remaining}% · ${formatCountdown(windowData, primary)}`);
+  }
+
   function classifyRateLimitWindows(rateLimit) {
     const windows = [rateLimit?.primary_window, rateLimit?.secondary_window].filter(Boolean);
     let fiveHour = null;
@@ -959,10 +1035,12 @@
       else if (seconds === 604_800) weekly = windowData;
     }
 
-    // Older responses historically used primary=5h and secondary=7d.
-    // Only fall back to slot order when duration metadata is absent altogether.
-    const hasDurationMetadata = windows.some((w) => Number.isFinite(Number(w?.limit_window_seconds)));
-    if (!hasDurationMetadata) {
+    // Only legacy responses with both windows and no durations can use slot order.
+    // A lone primary window may be weekly, so its slot cannot establish a 5h limit.
+    const hasDurationMetadata = windows.some((w) =>
+      w.limit_window_seconds != null && w.limit_window_seconds !== ''
+    );
+    if (!hasDurationMetadata && windows.length === 2) {
       fiveHour = rateLimit?.primary_window || null;
       weekly = rateLimit?.secondary_window || null;
     }
@@ -975,14 +1053,22 @@
 
     const rateLimit = payload?.rate_limit;
     const { fiveHour, weekly } = classifyRateLimitWindows(rateLimit);
+    fiveHourValue.hidden = remainingPercent(fiveHour) == null;
+    weeklyValue.hidden = Boolean(payload) && remainingPercent(weekly) == null;
     setRow(fiveHourValue, fiveHour, true);
     setRow(weeklyValue, weekly, false);
+    setCompactTrack(compactFiveHour, fiveHour, '5h', true);
+    setCompactTrack(compactWeekly, weekly, '7d');
 
     widget.classList.toggle('yy-cum-error', Boolean(lastError && !payload));
     if (payload) {
       widget.classList.remove('yy-cum-loading');
       const plan = payload.plan_type ? ` · ${payload.plan_type}` : '';
-      widget.title = `${t('usageTitle')}${plan}. ${t('clickRefresh')}`;
+      const quotas = [
+        !fiveHourValue.hidden && `5h ${t('remaining')} ${fiveHourValue.querySelector('.yy-cum-percent').textContent} · ${formatCountdown(fiveHour, true)}`,
+        !weeklyValue.hidden && `7d ${t('remaining')} ${weeklyValue.querySelector('.yy-cum-percent').textContent} · ${formatCountdown(weekly)}`
+      ].filter(Boolean);
+      widget.title = [`${t('usageTitle')}${plan}`, ...quotas, t('clickRefresh')].join('\n');
     } else if (lastError) {
       widget.title = `${t('readError')}: ${lastError}\n${t('retry')}`;
     }
