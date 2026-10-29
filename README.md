@@ -10,6 +10,22 @@
 
 Chat 和 Work 窗口都能用。界面支持中文和英文，在齿轮 → Language 里切换，Auto 会跟随浏览器语言。
 
+## 界面预览
+
+以下截图使用示例额度和模型数据，展示不同订阅、主题与展开状态。
+
+| 状态 | Pro · 浅色 | Plus · 深色 |
+|---|---|---|
+| 展开 | <img src="docs/images/pro-expanded-light.png" alt="Pro 浅色展开界面，仅显示 7 天额度和本轮模型路由" width="280"> | <img src="docs/images/plus-expanded-dark.png" alt="Plus 深色展开界面，显示 5 小时、7 天额度和本轮模型路由" width="280"> |
+| 收纳 | <img src="docs/images/pro-collapsed-light.png" alt="Pro 收纳栏，标题显示 Pro，下方保留周额度进度条" width="280"> | <img src="docs/images/plus-collapsed-dark.png" alt="Plus 深色收纳栏，上方蓝绿色为 5 小时额度，下方雾紫色为 7 天额度" width="280"> |
+
+<details>
+<summary>显示设置</summary>
+
+<img src="docs/images/display-settings-light.png" alt="显示设置面板，可调整语言、模型路由、自动隐藏、字体、颜色和透明度" width="540">
+
+</details>
+
 ## 安装
 
 1. 下载这个仓库（Code → Download ZIP）并解压。
